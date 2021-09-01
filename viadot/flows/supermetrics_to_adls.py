@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 from pathlib import Path
@@ -6,18 +5,20 @@ from typing import Any, Dict, List, Union
 
 import pandas as pd
 import pendulum
-import prefect
 from prefect import Flow, Task, apply_map, task
 from prefect.backend import set_key_value
 from prefect.tasks.secrets import PrefectSecret
 from prefect.utilities import logging
-from visions.functional import infer_type
-from visions.typesets.complete_set import CompleteSet
 
-from ..task_utils import add_ingestion_metadata_task
+
+from ..task_utils import (
+    add_ingestion_metadata,
+    get_df_dtypes,
+    dict_to_json as dict_to_json_1,
+    df_to_parquet,
+)
 from ..tasks import (
     AzureDataLakeUpload,
-    DownloadGitHubFile,
     RunGreatExpectationsValidation,
     SupermetricsToDF,
 )
@@ -25,65 +26,16 @@ from ..tasks import (
 logger = logging.get_logger(__name__)
 
 supermetrics_to_df_task = SupermetricsToDF()
-download_github_file_task = DownloadGitHubFile()
 validation_task = RunGreatExpectationsValidation()
 parquet_to_adls_task = AzureDataLakeUpload()
 json_to_adls_task = AzureDataLakeUpload()
 
-
-@task
-def write_to_json(dict_, path):
-
-    logger = prefect.context.get("logger")
-
-    if os.path.isfile(path):
-        logger.warning(f"File {path} already exists. Overwriting...")
-    else:
-        logger.debug(f"Writing to {path}...")
-
-    # create parent directories if they don't exist
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, mode="w") as f:
-        json.dump(dict_, f)
-
-    logger.debug(f"Successfully wrote to {path}.")
-
-
-@task
-def get_data_types(df: pd.DataFrame) -> dict:
-    df.dtypes.to_dict()
+dict_to_json_2 = dict_to_json_1.copy()
 
 
 @task
 def union_dfs_task(dfs: List[pd.DataFrame]):
     return pd.concat(dfs, ignore_index=True)
-
-
-@task
-def df_get_data_types_task(df):
-    typeset = CompleteSet()
-    dtypes = infer_type(df, typeset)
-    dtypes_dict = {k: str(v) for k, v in dtypes.items()}
-    return dtypes_dict
-
-
-@task
-def dtypes_to_json_task(dtypes_dict, local_json_path: str):
-    with open(local_json_path, "w") as fp:
-        json.dump(dtypes_dict, fp)
-
-
-@task
-def df_to_parquet_task(df, path: str, if_exists: str = "replace"):
-    if if_exists == "append":
-        if os.path.isfile(path):
-            parquet_df = pd.read_parquet(path)
-            out_df = pd.concat([parquet_df, df])
-        else:
-            out_df = df
-    elif if_exists == "replace":
-        out_df = df
-    out_df.to_parquet(path, index=False)
 
 
 @task
@@ -246,7 +198,7 @@ class SupermetricsToADLS(Flow):
         else:
             df = self.gen_supermetrics_task(ds_accounts=self.ds_accounts, flow=self)
 
-        write_json = write_to_json.bind(
+        write_json = dict_to_json_1.bind(
             dict_=self.expectation_suite,
             path=os.path.join(
                 self.expectations_path, self.expectation_suite_name + ".json"
@@ -272,9 +224,9 @@ class SupermetricsToADLS(Flow):
         else:
             validation_upstream = validation
 
-        df_with_metadata = add_ingestion_metadata_task.bind(df, flow=self)
+        df_with_metadata = add_ingestion_metadata.bind(df, flow=self)
 
-        df_to_parquet = df_to_parquet_task.bind(
+        to_parquet = df_to_parquet.bind(
             df=df_with_metadata,
             path=self.local_file_path,
             if_exists=self.if_exists,
@@ -289,9 +241,9 @@ class SupermetricsToADLS(Flow):
             vault_name=self.vault_name,
             flow=self,
         )
-        dtypes_dict = df_get_data_types_task.bind(df_with_metadata, flow=self)
-        dtypes_to_json_task.bind(
-            dtypes_dict=dtypes_dict, local_json_path=self.local_json_path, flow=self
+        dtypes_dict = get_df_dtypes.bind(df_with_metadata, flow=self)
+        write_dtypes = dict_to_json_2.bind(
+            dict_=dtypes_dict, path=self.local_json_path, flow=self
         )
         json_to_adls_task.bind(
             from_path=self.local_json_path,
@@ -305,6 +257,9 @@ class SupermetricsToADLS(Flow):
         write_json.set_upstream(df, flow=self)
         validation.set_upstream(write_json, flow=self)
         df_with_metadata.set_upstream(validation_upstream, flow=self)
-        parquet_to_adls_task.set_upstream(df_to_parquet, flow=self)
-        json_to_adls_task.set_upstream(dtypes_to_json_task, flow=self)
+        parquet_to_adls_task.set_upstream(to_parquet, flow=self)
+        json_to_adls_task.set_upstream(write_dtypes, flow=self)
         set_key_value(key=self.adls_dir_path, value=self.adls_file_path)
+
+        dict_to_json_1.name = "dump_expectation_suite"
+        dict_to_json_2.name = "dtypes_to_json"
