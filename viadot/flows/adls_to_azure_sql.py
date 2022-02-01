@@ -17,6 +17,7 @@ from ..tasks import (
     AzureSQLCreateTable,
     BCPTask,
     DownloadGitHubFile,
+    AzureSQLBulkInsert,
 )
 
 logger = logging.get_logger(__name__)
@@ -27,7 +28,7 @@ download_github_file_task = DownloadGitHubFile()
 promote_to_conformed_task = AzureDataLakeUpload()
 promote_to_operations_task = AzureDataLakeCopy()
 create_table_task = AzureSQLCreateTable()
-bulk_insert_task = BCPTask()
+bulk_insert_task = AzureSQLBulkInsert()  # BCPTask()  #   #
 
 
 @task
@@ -244,7 +245,8 @@ class ADLSToAzureSQL(Flow):
             flow=self,
         )
         bulk_insert_task.bind(
-            path=self.local_file_path,
+            # path=self.local_file_path,
+            from_path=self.adls_path,
             schema=self.schema,
             table=self.table,
             credentials_secret=self.sqldb_credentials_secret,

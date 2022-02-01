@@ -24,6 +24,7 @@ from ..tasks import (
     DownloadGitHubFile,
     RunGreatExpectationsValidation,
     SupermetricsToDF,
+    AzureSQLDBQuery,
 )
 
 logger = logging.get_logger(__name__)
@@ -33,6 +34,7 @@ download_github_file_task = DownloadGitHubFile()
 validation_task = RunGreatExpectationsValidation()
 file_to_adls_task = AzureDataLakeUpload()
 json_to_adls_task = AzureDataLakeUpload()
+azure_sql_query = AzureSQLDBQuery()
 
 
 class SupermetricsToADLS(Flow):
@@ -47,6 +49,7 @@ class SupermetricsToADLS(Flow):
         date_range_type: str = None,
         start_date: str = None,
         end_date: str = None,
+        with_last_date: bool = False,
         settings: Dict[str, Any] = None,
         filter: str = None,
         max_rows: int = 1000000,
@@ -64,7 +67,7 @@ class SupermetricsToADLS(Flow):
         adls_sp_credentials_secret: str = None,
         max_download_retries: int = 5,
         supermetrics_task_timeout: int = 60 * 30,
-        parallel: bool = True,
+        parallel: bool = False,  # True,
         tags: List[str] = ["extract"],
         vault_name: str = None,
         *args: List[any],
@@ -131,6 +134,7 @@ class SupermetricsToADLS(Flow):
         self.order_columns = order_columns
         self.if_exists = if_exists
         self.output_file_extension = output_file_extension
+        self.with_last_date = with_last_date
 
         # RunGreatExpectationsValidation
         self.expectation_suite = expectation_suite
@@ -172,9 +176,14 @@ class SupermetricsToADLS(Flow):
         return name.replace(" ", "_").lower()
 
     def gen_supermetrics_task(
-        self, ds_accounts: Union[str, List[str]], flow: Flow = None
+        self,
+        ds_accounts: Union[str, List[str]],
+        start_date_read: str = None,
+        flow: Flow = None,
     ) -> Task:
-
+        print(
+            f"gen_supermetrics_task - start_date_read type: {type(start_date_read)}, start_date_read: {start_date_read}"
+        )
         t = supermetrics_to_df_task.bind(
             ds_id=self.ds_id,
             ds_accounts=ds_accounts,
@@ -182,7 +191,7 @@ class SupermetricsToADLS(Flow):
             ds_user=self.ds_user,
             fields=self.fields,
             date_range_type=self.date_range_type,
-            start_date=self.start_date,
+            start_date=start_date_read,  # self.start_date,
             end_date=self.end_date,
             settings=self.settings,
             filter=self.filter,
@@ -196,13 +205,55 @@ class SupermetricsToADLS(Flow):
         )
         return t
 
+    def gen_start_data_task(
+        self,
+        credentials_secret: Union[str, List[str]],
+        query: str = None,
+        vault_name: str = None,
+        with_last_date: bool = False,
+        flow: Flow = None,
+    ) -> Task:
+        if with_last_date:
+            t = azure_sql_query.bind(
+                query=query,
+                vault_name=vault_name,
+                with_last_date=True,
+                flow=flow,
+            )
+            return t
+        return None
+
     def gen_flow(self) -> Flow:
+
+        last_date_query = (
+            f"select MAX(CAST(_viadot_downloaded_at_utc AS DATE)) from sandbox.c4c_cic"
+        )
+        start_date_from_task = self.gen_start_data_task(
+            credentials_secret=self.adls_sp_credentials_secret,
+            query=last_date_query,
+            vault_name=self.vault_name,
+            with_last_date=self.with_last_date,
+            flow=self,
+        )
+        print(
+            f"start_date_from_task type: {type(start_date_from_task)}, last_query resuolt: {start_date_from_task}"
+        )
+
         if self.parallel:
             # generate a separate task for each account
-            dfs = apply_map(self.gen_supermetrics_task, self.ds_accounts, flow=self)
+            dfs = apply_map(
+                self.gen_supermetrics_task,
+                self.ds_accounts,
+                start_date_read=start_date_from_task,
+                flow=self,
+            )
             df = union_dfs_task.bind(dfs, flow=self)
         else:
-            df = self.gen_supermetrics_task(ds_accounts=self.ds_accounts, flow=self)
+            df = self.gen_supermetrics_task(
+                ds_accounts=self.ds_accounts,
+                start_date_read=start_date_from_task,
+                flow=self,
+            )
 
         write_json = write_to_json.bind(
             dict_=self.expectation_suite,

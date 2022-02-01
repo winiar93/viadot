@@ -245,6 +245,7 @@ class AzureSQLDBQuery(Task):
         self,
         query: str,
         credentials_secret: str = None,
+        with_last_date: bool = False,
         vault_name: str = None,
     ):
         """Run an Azure SQL Database query
@@ -263,4 +264,9 @@ class AzureSQLDBQuery(Task):
         result = azure_sql.run(query)
 
         self.logger.info(f"Successfully ran the query.")
+        print(f"result type: {type(result)}, result: {result[0]}")
+        # return str(result[0])
+        if with_last_date:
+            return str(result[0])
+
         return result

@@ -239,6 +239,7 @@ class SupermetricsToDF(Task):
 
         # Download data to a local CSV file
         self.logger.info(f"Downloading data to a DataFrame...")
+        self.logger.info(f"start_date type: {type(start_date)}")
         df = supermetrics.to_df(if_empty=if_empty)
         self.logger.info(f"Successfully downloaded data to a DataFrame.")
         return df
