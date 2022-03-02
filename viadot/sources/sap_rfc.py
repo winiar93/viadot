@@ -406,6 +406,7 @@ class SAPRFC(Source):
             SEPARATORS = [
                 "|",
                 "/t",
+                "\\",
                 "#",
                 ";",
                 "@",
@@ -415,6 +416,7 @@ class SAPRFC(Source):
                 "~",
                 "{",
                 "}",
+                "?",
                 "$",
             ]
         else:
